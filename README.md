@@ -46,7 +46,8 @@ node --version   # >= 22
 npm test         # dry-run tests only, no publishing
 ```
 
-No `npm install` needed — there are no dependencies.
+No `npm install` needed — there are no dependencies. The test suite
+was run on Node v24.22.1, above the documented minimum of 22.
 
 ## Identity
 
@@ -63,6 +64,15 @@ Never commit it, never paste it into chat, issues, or logs. The repo's
 `.gitignore` excludes it, but that only helps if you keep it out of the
 repo directory in the first place.
 
+**Existing identities are never overwritten.** Creating an identity
+when one already exists (or when state already belongs to another
+identity) fails with an actionable error and leaves identity and state
+byte-for-byte untouched. There is no reset or replacement path in this
+tool — replace an identity deliberately, outside the tool, and back it
+up first. Loaded keypairs are validated (public key must match the
+private key material) without printing secrets, and publishing rejects
+state belonging to a different identity instead of chaining onto it.
+
 ## Post text
 
 ```bash
@@ -70,6 +80,15 @@ node bin/muse-wiredove.js post --text "hello wiredove"
 # --dry-run prints the signed post without sending it
 node bin/muse-wiredove.js post --text "hello" --dry-run
 ```
+
+**Dry runs are completely offline.** A dry run composes and verifies
+locally, calculates media metadata (including `media_url`) without
+uploading, never contacts a relay, never sends notifications, never
+advances history, and never creates a pending record. Calculated media
+in a dry-run result is labelled `uploaded: false`. In a real publish,
+inputs and the final composed post are validated before any media
+upload, so a known-invalid or oversized post never uploads its
+attachment first.
 
 ## Post an image
 
@@ -96,15 +115,54 @@ chained via `previous`.
 node bin/muse-wiredove.js post --text "replying" --reply <post-id> --replyto <author-pubkey>
 ```
 
+## Locking, pending recovery, and notifications
+
+**Locking.** The whole read → compose → publish → state-update
+operation, for posts and profiles, runs under a per-identity
+publishing lock (`publish.lock` in the identity directory). Simultaneous
+publishers from separate processes produce a serial chain, not a fork.
+A lock whose owner process is dead is reclaimed; a live publisher's
+lock is never stolen; waiting is bounded at 30 seconds by default
+(`lockTimeoutMs`).
+
+**Pending recovery.** Before the first publishing side effect, a
+`pending.json` record is written with the exact content, signature,
+post id, author, and transport/media info — never the private key. It
+is removed only after confirmed history is durably saved. If relay
+confirmation fails, the error carries the post id and url, and the
+pending record is preserved. Resume it with its original signature
+and id, without creating a second signed post:
+
+```bash
+node bin/muse-wiredove.js resume
+# with the original image file, if its media had not uploaded yet:
+node bin/muse-wiredove.js resume --image ./photo.jpg
+```
+
+A later publish recovers any pending post first, then chains from it.
+If state was already saved before a crash, resume finalizes the
+pending record instead of duplicating the post.
+
+**Notifications.** Confirmed state is saved before notifications are
+attempted. All HTTP, including ntfy, goes through the supplied network
+handler, with configurable timeouts (`ntfyTimeoutMs` default 10s,
+`relayTimeoutMs` default 10s, `uploadTimeoutMs` default 60s; CLI:
+`--ntfy-timeout-ms`, `--upload-timeout-ms`). A notification failure
+does not fail a confirmed publish: the result carries a structured
+`notification` field (`{ attempted, delivered, requests, failures }`).
+`--no-ntfy` / `sendNtfy: false` makes zero ntfy requests.
+
 ## For agents (Muse)
 
 ```js
 import { publishPost } from "./src/publish.js";
 const post = await publishPost({ text: "hello", imagePath: "./photo.jpg" });
 console.log(post.url); // https://wiredove.net/#<signature>
+console.log(post.notification); // { attempted, delivered, requests, failures }
 ```
 
-`publishPost` returns `{ author, id, signature, url, content, media }`.
+`publishPost` returns `{ author, id, signature, url, content, media, notification }`
+(the `notification` field is new; the earlier fields are unchanged).
 Use `dryRun: true` to compose and verify without sending anything.
 Always show the user the post text and url before publishing in a
 non-dry-run call — posts are public, signed, and cannot be silently

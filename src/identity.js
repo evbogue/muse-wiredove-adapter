@@ -63,13 +63,32 @@ export async function loadState(dir) {
   if (!state || typeof state !== "object" || Array.isArray(state)) {
     throw new Error(`State at ${statePath(dir)} has an invalid shape; refusing to discard it`);
   }
+  validateStateShape(state, statePath(dir));
+  return state;
+}
+
+// Saved history references must be well-formed, not silently dropped
+// or chained onto. A post id is an ANProto message hash: 43 base64
+// chars plus '='. Name/pubkey, when present, must be strings.
+export function validateStateShape(state, label = "state") {
+  if (state.pubkey !== undefined && typeof state.pubkey !== "string") {
+    throw new Error(`${label} has an invalid pubkey; refusing to use it`);
+  }
+  if (state.name !== undefined && typeof state.name !== "string") {
+    throw new Error(`${label} has an invalid name; refusing to use it`);
+  }
+  if (state.previous !== undefined && (typeof state.previous !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(state.previous))) {
+    throw new Error(`${label} has an invalid previous post reference; refusing to chain onto it`);
+  }
   return state;
 }
 
 export async function saveState(dir, state) {
   const target = statePath(dir);
   await mkdir(dir, { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  // Unique per call, not just per millisecond: concurrent saves in
+  // the same process must not share a temp file and race the rename.
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", "utf8");
   await rename(tmp, target);
 }

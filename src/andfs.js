@@ -45,7 +45,7 @@ export async function prepareMedia({ bytes, mime, name, origin = "https://wiredo
   };
 }
 
-export async function uploadMedia({ bytes, mime, name, keypair, origin = "https://wiredove.net", fetchImpl = fetch, reply, replyto }) {
+export async function uploadMedia({ bytes, mime, name, keypair, origin = "https://wiredove.net", fetchImpl = fetch, reply, replyto, timeoutMs = 60000 }) {
   const prepared = await prepareMedia({ bytes, mime, name, origin, reply, replyto });
   const { manifestHash } = prepared;
   const authorization = JSON.stringify({
@@ -55,6 +55,7 @@ export async function uploadMedia({ bytes, mime, name, keypair, origin = "https:
   const response = await fetchImpl(`${origin}/api/media`, {
     method: "POST",
     body: bytes,
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       "X-ANProto-Content": authorization,
       "X-ANProto-Signature": await an.sign(await an.hash(authorization), keypair),

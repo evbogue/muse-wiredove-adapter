@@ -38,23 +38,10 @@ test("protocol: compose verifies", async () => {
   await assert.rejects(() => protocol.verify(post.signature, "tampered"));
 });
 
-test("relay: publish confirms via gossip(id)", async () => {
-  const seen = [];
-  const relay = createWiredoveRelay({
-    baseURL: "https://example.test",
-    fetchImpl: async (url, opts) => {
-      if (String(url).endsWith("/gossip")) {
-        seen.push(opts.body);
-        const isId = opts.body.length === 44 && !opts.body.includes("---");
-        return { ok: true, json: async () => ({ messages: isId ? ["sig-123"] : [] }) };
-      }
-      throw new Error("unexpected fetch");
-    },
-  });
-  // Direct gossip path, not full publish (which needs a real signature id):
-  assert.deepEqual(await relay.gossip("hello"), []);
-  assert.equal(seen.length, 1);
-});
+// Relay publish flow is covered properly in test/relay.test.js
+// (content -> signature -> id confirmation, missing confirmation,
+// HTTP failures). The old gossip-only test here was misleading and
+// has been removed.
 
 test("andfs: manifest hash is deterministic", async () => {
   const a = await andfsManifest(new TextEncoder().encode("hello"));
