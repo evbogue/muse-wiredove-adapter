@@ -4,11 +4,17 @@
 // Media goes through AndFS first (see andfs.js), then its media_url is
 // appended to the body if it is not already there, exactly like the
 // website composer does.
+//
+// Work order 2 ordering: local preparation and composition/verification
+// happen before any network access. A dry run therefore never uploads,
+// contacts a relay, or sends a notification, and never advances history.
+// A real publish composes and verifies the final post first, so a
+// known-invalid post never uploads its attachment.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { protocol } from "./protocol.js";
 import { createWiredoveRelay } from "./relay.js";
-import { uploadMedia } from "./andfs.js";
+import { uploadMedia, prepareMedia } from "./andfs.js";
 import { an } from "./an.js";
 import { loadIdentity, loadState, saveState, defaultDir, assertStateBelongsToIdentity } from "./identity.js";
 
@@ -16,6 +22,15 @@ const MIME_BY_EXT = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image
 
 async function ntfy(value) {
   await fetch("https://ntfy.sh/wiredove", { method: "POST", body: `https://wiredove.net/#${value}` });
+}
+
+async function readAndPrepareMedia(imagePath, origin, reply, replyto) {
+  const bytes = new Uint8Array(await readFile(imagePath));
+  const ext = path.extname(imagePath).toLowerCase();
+  const mime = MIME_BY_EXT[ext];
+  if (!mime) throw new Error(`Unknown media type for ${imagePath}`);
+  const prepared = await prepareMedia({ bytes, mime, name: path.basename(imagePath), origin, reply, replyto });
+  return { bytes, mime, prepared };
 }
 
 export async function publishPost({
@@ -27,13 +42,13 @@ export async function publishPost({
   const keypair = await loadIdentity(dir);
   const state = await loadState(dir);
   assertStateBelongsToIdentity(state, an.pubkeyOf(keypair));
+
+  // Local preparation only: no network yet.
+  let mediaFile = null;
   let media = null;
   if (imagePath) {
-    const bytes = new Uint8Array(await readFile(imagePath));
-    const ext = path.extname(imagePath).toLowerCase();
-    const mime = MIME_BY_EXT[ext];
-    if (!mime) throw new Error(`Unknown media type for ${imagePath}`);
-    media = await uploadMedia({ bytes, mime, name: path.basename(imagePath), keypair, origin, fetchImpl, reply, replyto });
+    mediaFile = await readAndPrepareMedia(imagePath, origin, reply, replyto);
+    media = mediaFile.prepared;
   }
   let body = text;
   if (media && !body.includes(media.media_url)) body = [body.trim(), media.media_url].filter(Boolean).join("\n\n");
@@ -46,14 +61,34 @@ export async function publishPost({
   if (prev) meta.previous = prev;
   if (reply) meta.reply = reply;
   if (replyto) meta.replyto = replyto;
-  if (media) Object.assign(meta, media);
+  if (media) {
+    // `uploaded` is a local label for the caller, not wire metadata:
+    // it must not leak into the signed frontmatter.
+    const { uploaded: _uploaded, ...mediaMeta } = media;
+    Object.assign(meta, mediaMeta);
+  }
 
+  // Compose and verify the final post locally before any upload.
+  // protocol.compose enforces the 65,536-byte post cap.
   const post = await protocol.compose(keypair, body, meta);
   const result = {
     author: post.author, id: post.id, signature: post.signature,
     url: `https://wiredove.net/#${post.signature}`, content: post.content, media,
   };
-  if (dryRun) return { ...result, dryRun: true };
+  if (dryRun) {
+    // media.media_url is calculated, not uploaded: media.uploaded is false.
+    return { ...result, dryRun: true };
+  }
+
+  // Real publish: upload only after the post is known-valid, then
+  // confirm the upload matches the prepared attachment in the post.
+  if (mediaFile) {
+    const uploaded = await uploadMedia({ bytes: mediaFile.bytes, mime: mediaFile.mime, name: path.basename(imagePath), keypair, origin, fetchImpl, reply, replyto });
+    if (uploaded.andfs !== media.andfs || uploaded.media_url !== media.media_url) {
+      throw new Error("Upload did not confirm the prepared attachment; refusing to publish a post whose media does not match");
+    }
+    result.media = uploaded;
+  }
 
   const relay = createWiredoveRelay({ baseURL: relayURL, fetchImpl });
   await relay.publish({ content: post.content, signature: post.signature, id: post.id });
@@ -66,13 +101,12 @@ export async function publishProfile({ name, bio, imagePath, dir = defaultDir(),
   const keypair = await loadIdentity(dir);
   const state = await loadState(dir);
   assertStateBelongsToIdentity(state, an.pubkeyOf(keypair));
+
+  let mediaFile = null;
   let media = null;
   if (imagePath) {
-    const bytes = new Uint8Array(await readFile(imagePath));
-    const ext = path.extname(imagePath).toLowerCase();
-    const mime = MIME_BY_EXT[ext];
-    if (!mime) throw new Error(`Unknown media type for ${imagePath}`);
-    media = await uploadMedia({ bytes, mime, name: path.basename(imagePath), keypair, origin, fetchImpl });
+    mediaFile = await readAndPrepareMedia(imagePath, origin);
+    media = mediaFile.prepared;
   }
   const meta = {};
   if (bio !== undefined) meta.bio = bio;
@@ -82,6 +116,14 @@ export async function publishProfile({ name, bio, imagePath, dir = defaultDir(),
   const post = await protocol.compose(keypair, "", meta);
   const result = { author: post.author, id: post.id, signature: post.signature, url: `https://wiredove.net/#${post.signature}`, content: post.content, media };
   if (dryRun) return { ...result, dryRun: true };
+
+  if (mediaFile) {
+    const uploaded = await uploadMedia({ bytes: mediaFile.bytes, mime: mediaFile.mime, name: path.basename(imagePath), keypair, origin, fetchImpl });
+    if (uploaded.andfs !== media.andfs || uploaded.media_url !== media.media_url) {
+      throw new Error("Upload did not confirm the prepared attachment; refusing to publish a profile whose image does not match");
+    }
+    result.media = uploaded;
+  }
   const relay = createWiredoveRelay({ baseURL: relayURL, fetchImpl });
   await relay.publish({ content: post.content, signature: post.signature, id: post.id });
   await saveState(dir, { ...state, pubkey: post.author, ...(meta.name ? { name: meta.name } : {}), previous: post.id });

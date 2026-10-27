@@ -28,11 +28,26 @@ export async function andfsManifest(bytes) {
   return { manifestHash: await sha256UrlSafe(manifest), manifest };
 }
 
-export async function uploadMedia({ bytes, mime, name, keypair, origin = "https://wiredove.net", fetchImpl = fetch, reply, replyto }) {
+// Local-only media preparation (work order 2): validation, manifest
+// calculation, and metadata, with no network access. The returned
+// media_url is calculated, not uploaded — callers must label it as
+// such (uploaded: false) until uploadMedia confirms it.
+export async function prepareMedia({ bytes, mime, name, origin = "https://wiredove.net", reply, replyto }) {
   if (!ALLOWED_MIME.has(mime)) throw new Error(`Unsupported media format: ${mime}`);
   if (!bytes.length || bytes.length > MAX_BYTES) throw new Error("Media must be between 1 byte and 32 MiB");
   if (Boolean(reply) !== Boolean(replyto)) throw new Error("A media reply requires both reply and replyto");
   const { manifestHash } = await andfsManifest(bytes);
+  return {
+    type: mime.split("/")[0], andfs: manifestHash, mime,
+    media_name: name || `${mime.split("/")[0]}-${Date.now()}`,
+    media_size: bytes.length, media_url: `${origin}/media/${manifestHash}`, media_source: origin,
+    uploaded: false,
+  };
+}
+
+export async function uploadMedia({ bytes, mime, name, keypair, origin = "https://wiredove.net", fetchImpl = fetch, reply, replyto }) {
+  const prepared = await prepareMedia({ bytes, mime, name, origin, reply, replyto });
+  const { manifestHash } = prepared;
   const authorization = JSON.stringify({
     action: "andfs-upload-v1", andfs: manifestHash, mime, media_size: bytes.length,
     ...(reply ? { reply } : {}), ...(replyto ? { replyto } : {}),
@@ -55,9 +70,5 @@ export async function uploadMedia({ bytes, mime, name, keypair, origin = "https:
   if (saved.andfs !== manifestHash || saved.mime !== mime || saved.media_size !== bytes.length) {
     throw new Error("Upload server did not confirm the expected AndFS attachment");
   }
-  return {
-    type: mime.split("/")[0], andfs: manifestHash, mime,
-    media_name: name || `${mime.split("/")[0]}-${Date.now()}`,
-    media_size: bytes.length, media_url: `${origin}/media/${manifestHash}`, media_source: origin,
-  };
+  return { ...prepared, uploaded: true };
 }
