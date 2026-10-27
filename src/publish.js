@@ -10,7 +10,7 @@ import { protocol } from "./protocol.js";
 import { createWiredoveRelay } from "./relay.js";
 import { uploadMedia } from "./andfs.js";
 import { an } from "./an.js";
-import { loadIdentity, loadState, saveState, defaultDir } from "./identity.js";
+import { loadIdentity, loadState, saveState, defaultDir, assertStateBelongsToIdentity } from "./identity.js";
 
 const MIME_BY_EXT = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".webm": "video/webm", ".ogg": "audio/ogg", ".wav": "audio/wav" };
 
@@ -26,6 +26,7 @@ export async function publishPost({
 } = {}) {
   const keypair = await loadIdentity(dir);
   const state = await loadState(dir);
+  assertStateBelongsToIdentity(state, an.pubkeyOf(keypair));
   let media = null;
   if (imagePath) {
     const bytes = new Uint8Array(await readFile(imagePath));
@@ -64,6 +65,7 @@ export async function publishPost({
 export async function publishProfile({ name, bio, imagePath, dir = defaultDir(), relayURL = "https://pub.wiredove.net", origin = "https://wiredove.net", dryRun = false, fetchImpl = fetch } = {}) {
   const keypair = await loadIdentity(dir);
   const state = await loadState(dir);
+  assertStateBelongsToIdentity(state, an.pubkeyOf(keypair));
   let media = null;
   if (imagePath) {
     const bytes = new Uint8Array(await readFile(imagePath));
