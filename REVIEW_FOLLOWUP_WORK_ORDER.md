@@ -31,6 +31,12 @@ Status: ready for Muse; not complete.
 
 Review baseline: `56ea566` (2026-10-27). All 52 existing tests passed on Node 25.9.0, but targeted offline checks reproduced the five failures below. No live posts or uploads were used for the review. Passing the existing suite does not close this work order.
 
+## Reconciliation checkpoint — 30 October 2026
+
+Merged GitHub fixes `66a7bf9` and `0d9214e` into the local coordinated work order. They add the manifest-hash fix and regression coverage for dry-run refusal, lock recovery, original resume parameters, and authenticated pending records. The incoming lock tests referenced an absent `test/helpers/lock-child.mjs`; this checkpoint adds that subprocess fixture. `npm test` now passes **79 tests**, including killed-owner recovery and four-process stale-lock contention.
+
+These results establish the exercised local regressions, not completion of every acceptance item below. Keep the documented residual lock assumptions in `src/lock.js` visible; full media/profile paths, all CLI/parameter cases, and real configured-local-service website/embed interoperability still need their stated acceptance evidence. No public publication or notification was performed.
+
 ## Order of work
 
 1. Fix the five review findings below and add regression tests that fail against the review baseline.
