@@ -47,7 +47,11 @@ export async function prepareMedia({ bytes, mime, name, origin = "https://wiredo
 
 export async function uploadMedia({ bytes, mime, name, keypair, origin = "https://wiredove.net", fetchImpl = fetch, reply, replyto, timeoutMs = 60000 }) {
   const prepared = await prepareMedia({ bytes, mime, name, origin, reply, replyto });
-  const { manifestHash } = prepared;
+  // prepareMedia returns the manifest hash as `andfs`, not
+  // `manifestHash` — destructuring the wrong name silently dropped
+  // the field from the authorization JSON, which the live server
+  // (correctly) rejected. Regression test in test/upload.test.js.
+  const manifestHash = prepared.andfs;
   const authorization = JSON.stringify({
     action: "andfs-upload-v1", andfs: manifestHash, mime, media_size: bytes.length,
     ...(reply ? { reply } : {}), ...(replyto ? { replyto } : {}),
