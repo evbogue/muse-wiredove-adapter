@@ -25,7 +25,7 @@ import { uploadMedia, prepareMedia } from "./andfs.js";
 import { an } from "./an.js";
 import { loadIdentity, loadState, saveState, defaultDir, assertStateBelongsToIdentity } from "./identity.js";
 import { withPublishLock } from "./lock.js";
-import { loadPending, savePending, deletePending, pendingError } from "./pending.js";
+import { loadPending, savePending, deletePending, pendingError, validatePending } from "./pending.js";
 
 const MIME_BY_EXT = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".webm": "video/webm", ".ogg": "audio/ogg", ".wav": "audio/wav" };
 
@@ -68,11 +68,50 @@ function stripUploaded(media) {
   return rest;
 }
 
+// Review finding 2: a dry run must never invoke pending recovery. When a
+// pending record exists, the dry run is refused with an actionable error
+// instead — no upload, relay, or notification request, and identity,
+// state, and pending files stay byte-for-byte unchanged.
+function pendingBlocksDryRun(pending) {
+  const err = new Error(
+    `Dry run refused: a pending ${pending.kind} publication (${pending.id}) exists. ` +
+    `Resume it first, or clear it only after confirming its outcome, then retry the dry run. ` +
+    `No network requests were made and the pending record was left unchanged.`
+  );
+  err.code = "pending-exists";
+  err.postId = pending.id;
+  err.url = pending.url;
+  return err;
+}
+
 // Complete a pending post/profile with its original signature and id.
 // Returns { recovered, alreadySaved, author, id, signature, url, content, media }.
 // Throws a pendingError (pending record preserved) on relay or state
 // failure, so the caller can report the id/url instead of losing it.
 async function completePending(pending, { dir, keypair, state, fetchImpl, relayURL, origin, sendNtfy, mediaBytes, ntfyTimeoutMs, relayTimeoutMs, uploadTimeoutMs }) {
+  // Review finding 5: authenticate the pending record before any
+  // network request, state write, or deletion. Throws a pendingError
+  // with the record preserved on any failure.
+  const verified = await validatePending(pending, { pubkey: an.pubkeyOf(keypair), state });
+
+  // Review finding 4: resume reuses the pending record's ORIGINAL
+  // media and transport parameters, not the caller's current ones.
+  // Records written by the current version always carry relayURL and
+  // origin; a missing sendNtfy (older record) falls back to the
+  // caller, then to the kind default. Reply references are recovered
+  // from the signed content — the trustworthy source — not from a
+  // re-supplied file or current flags.
+  const effRelayURL = pending.relayURL || relayURL;
+  const effOrigin = pending.origin || origin;
+  // Notification preference: the record's original setting rules,
+  // except an explicitly passed sendNtfy=false (e.g. CLI --no-ntfy)
+  // disables them. A record that predates the field (sendNtfy
+  // undefined) falls back to the caller, then to the kind default.
+  const effSendNtfy = sendNtfy === false ? false
+    : (pending.sendNtfy !== undefined ? pending.sendNtfy
+      : (sendNtfy !== undefined ? sendNtfy : pending.kind === "post"));
+  const meta = verified.parsed || {};
+
   if (state.previous === pending.id) {
     await deletePending(dir);
     return { recovered: true, alreadySaved: true, author: pending.author, id: pending.id, signature: pending.signature, url: pending.url, content: pending.content, media: pending.media || null, notification: { attempted: false, delivered: false, reason: "already-saved", requests: 0, failures: [] } };
@@ -83,17 +122,28 @@ async function completePending(pending, { dir, keypair, state, fetchImpl, relayU
     if (!mediaBytes) {
       throw pendingError(`Pending ${pending.kind} ${pending.id} has media that was not uploaded yet; resume with the original image file so the same prepared attachment can be retried`, pending);
     }
-    const uploaded = await uploadMedia({ bytes: mediaBytes.bytes, mime: mediaBytes.mime, name: media.media_name, keypair, origin, fetchImpl, reply: mediaBytes.reply, replyto: mediaBytes.replyto, timeoutMs: uploadTimeoutMs });
+    // Validate the supplied resume file against the signed attachment
+    // fields locally, before any upload request.
+    if (mediaBytes.prepared.andfs !== media.andfs) {
+      throw pendingError(`Resume image does not match the pending ${pending.kind}'s prepared attachment (andfs hash); refusing to upload a different file`, pending);
+    }
+    if (mediaBytes.prepared.mime !== media.mime) {
+      throw pendingError(`Resume image MIME does not match the pending ${pending.kind}'s prepared attachment; refusing to upload a different file`, pending);
+    }
+    if (mediaBytes.prepared.media_size !== media.media_size) {
+      throw pendingError(`Resume image size does not match the pending ${pending.kind}'s prepared attachment; refusing to upload a different file`, pending);
+    }
+    const uploaded = await uploadMedia({ bytes: mediaBytes.bytes, mime: mediaBytes.mime, name: media.media_name, keypair, origin: effOrigin, fetchImpl, reply: meta.reply, replyto: meta.replyto, timeoutMs: uploadTimeoutMs });
     if (uploaded.andfs !== media.andfs || uploaded.media_url !== media.media_url) {
       throw pendingError(`Resume image does not match the pending ${pending.kind}'s prepared attachment; refusing to publish with different media`, pending);
     }
     media = uploaded;
-    pending.media = uploaded;
+    pending.media = stripUploaded(uploaded);
     pending.mediaUploaded = true;
     await savePending(dir, pending);
   }
 
-  const relay = createWiredoveRelay({ baseURL: relayURL, fetchImpl, timeoutMs: relayTimeoutMs });
+  const relay = createWiredoveRelay({ baseURL: effRelayURL, fetchImpl, timeoutMs: relayTimeoutMs });
   try {
     await relay.publish({ content: pending.content, signature: pending.signature, id: pending.id });
   } catch (err) {
@@ -111,12 +161,12 @@ async function completePending(pending, { dir, keypair, state, fetchImpl, relayU
   }
   await deletePending(dir);
   const notification = pending.kind === "post"
-    ? await sendNotifications({ signature: pending.signature, content: pending.content, fetchImpl, timeoutMs: ntfyTimeoutMs, sendNtfy })
+    ? await sendNotifications({ signature: pending.signature, content: pending.content, fetchImpl, timeoutMs: ntfyTimeoutMs, sendNtfy: effSendNtfy })
     : { attempted: false, delivered: false, reason: "profile", requests: 0, failures: [] };
   return { recovered: true, alreadySaved: false, author: pending.author, id: pending.id, signature: pending.signature, url: pending.url, content: pending.content, media, notification };
 }
 
-export async function resumePending({ dir = defaultDir(), relayURL = "https://pub.wiredove.net", origin = "https://wiredove.net", sendNtfy = true, fetchImpl = fetch, imagePath, ntfyTimeoutMs = 10000, relayTimeoutMs = 10000, uploadTimeoutMs = 60000 } = {}) {
+export async function resumePending({ dir = defaultDir(), relayURL = "https://pub.wiredove.net", origin = "https://wiredove.net", sendNtfy, fetchImpl = fetch, imagePath, ntfyTimeoutMs = 10000, relayTimeoutMs = 10000, uploadTimeoutMs = 60000 } = {}) {
   const dirPath = dir || defaultDir();
   return withPublishLock(dirPath, async () => {
     const keypair = await loadIdentity(dirPath);
@@ -124,9 +174,15 @@ export async function resumePending({ dir = defaultDir(), relayURL = "https://pu
     assertStateBelongsToIdentity(state, an.pubkeyOf(keypair));
     const pending = await loadPending(dirPath);
     if (!pending) return null;
+    // Review finding 4: the resume file is prepared against the
+    // pending record's ORIGINAL origin, not the caller's current one,
+    // and completePending prefers the record's relay/origin/sendNtfy.
+    // An explicit sendNtfy here overrides the record; otherwise the
+    // record's own preference rules (it does not silently default
+    // to enabled).
     let mediaBytes = null;
     if (pending.media && !pending.mediaUploaded && imagePath) {
-      mediaBytes = await readAndPrepareMedia(imagePath, origin);
+      mediaBytes = await readAndPrepareMedia(imagePath, pending.origin || origin);
       if (mediaBytes.prepared.andfs !== pending.media.andfs) {
         throw pendingError("Resume image does not match the pending post's prepared attachment", pending);
       }
@@ -154,8 +210,12 @@ async function publishPostInner({
   assertStateBelongsToIdentity(state, an.pubkeyOf(keypair));
 
   // Recover any pending post before chaining a new one from stale state.
+  // Review finding 2: a dry run never recovers — it is refused outright,
+  // so no upload, relay, or notification request can happen and identity,
+  // state, and pending files stay byte-for-byte unchanged.
   const existingPending = await loadPending(dir);
   if (existingPending) {
+    if (dryRun) throw pendingBlocksDryRun(existingPending);
     await completePending(existingPending, { dir, keypair, state, fetchImpl, relayURL: existingPending.relayURL || relayURL, origin, sendNtfy, mediaBytes: null, ntfyTimeoutMs, relayTimeoutMs, uploadTimeoutMs });
     state = await loadState(dir);
   }
@@ -196,7 +256,7 @@ async function publishPostInner({
   const nextState = { ...state, pubkey: post.author, ...(displayName ? { name: displayName } : {}), previous: post.id };
   const pending = {
     version: 1, kind: "post", author: post.author, id: post.id, signature: post.signature,
-    url: result.url, content: post.content, relayURL, origin, media: stripUploaded(media),
+    url: result.url, content: post.content, relayURL, origin, sendNtfy, media: stripUploaded(media),
     mediaUploaded: false, relayConfirmed: false, nextState, createdAt: Date.now(),
   };
   await savePending(dir, pending);
@@ -247,6 +307,7 @@ async function publishProfileInner({ name, bio, imagePath, dir = defaultDir(), r
 
   const existingPending = await loadPending(dir);
   if (existingPending) {
+    if (dryRun) throw pendingBlocksDryRun(existingPending);
     await completePending(existingPending, { dir, keypair, state, fetchImpl, relayURL: existingPending.relayURL || relayURL, origin, sendNtfy, mediaBytes: null, ntfyTimeoutMs, relayTimeoutMs, uploadTimeoutMs });
     state = await loadState(dir);
   }
@@ -269,7 +330,7 @@ async function publishProfileInner({ name, bio, imagePath, dir = defaultDir(), r
   const nextState = { ...state, pubkey: post.author, ...(meta.name ? { name: meta.name } : {}), previous: post.id };
   const pending = {
     version: 1, kind: "profile", author: post.author, id: post.id, signature: post.signature,
-    url: result.url, content: post.content, relayURL, origin, media: stripUploaded(media),
+    url: result.url, content: post.content, relayURL, origin, sendNtfy, media: stripUploaded(media),
     mediaUploaded: false, relayConfirmed: false, nextState, createdAt: Date.now(),
   };
   await savePending(dir, pending);

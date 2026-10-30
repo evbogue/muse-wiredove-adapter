@@ -28,7 +28,8 @@ Commands:
   identity [--name NAME]        Create a new identity (writes a secret keypair file)
   post --text TEXT [--image FILE] [--reply ID] [--replyto PUBKEY] [--previous ID] [--dry-run] [--no-ntfy]
   profile [--name NAME] [--bio TEXT] [--image FILE] [--dry-run]
-  resume [--image FILE]       Resume a pending post/profile with its original signature and id
+  resume [--image FILE] [--no-ntfy]   Resume a pending post/profile with its original signature and id
+                                 (reuses the record's original origin/relay/notification settings)
 
 The identity file defaults to ${identityPath()}.
 Posts are public and signed; they cannot be silently un-published.`);
@@ -54,7 +55,12 @@ try {
     });
     console.log(JSON.stringify({ ...result, previousName: state.name || null }, null, 2));
   } else if (cmd === "resume") {
-    const result = await resumePending({ dir, imagePath: flags.image });
+    const result = await resumePending({
+      dir, imagePath: flags.image,
+      // An explicit --no-ntfy overrides the pending record's stored
+      // preference; without it, the record's original setting rules.
+      ...(flags["no-ntfy"] ? { sendNtfy: false } : {}),
+    });
     console.log(JSON.stringify(result ?? { recovered: false, note: "No pending publish to resume." }, null, 2));
   } else if (cmd === "pubkey") {
     const { loadIdentity } = await import("../src/identity.js");
