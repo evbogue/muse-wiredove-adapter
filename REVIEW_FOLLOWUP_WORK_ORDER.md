@@ -1,5 +1,32 @@
 # Work order: finish reliability fixes and remaining improvements
 
+## Current priority — sustainable internet fame, 2026-10-29
+
+Status: planned; this documentation update does not complete implementation or authorize deployment.
+
+**Research purpose:** learn whether publishing on Ev’s own domain, with portable authorship and accessible conversations, leads to repeat recognition, relationships, collaborations, and opportunities at a sustainable cost in time.
+
+**Shared first milestone:** a visitor reads Ev’s Wiredove posts on evbogue.com, opens a conversation, replies without leaving the site, and can reload the same conversation. The reply is also retrievable in Wiredove. Reading requires no identity setup. Validate writes with disposable identities and isolated local services before any separately authorized public release.
+
+### Next ticket: make agent publication dependable
+
+The adapter is an additional publishing entrance. It is not the browser embed runtime and must not block the first human reply loop.
+
+- [ ] Start with review finding 1 below: use the prepared AndFS hash in upload authorization and response validation. Exercise complete media post/profile paths with an independently known hash.
+- [ ] Finish the other reproduced findings in this document, including pending recovery during dry runs and abandoned-lock reclamation. Keep the existing acceptance criteria; a passing old suite is insufficient.
+- [ ] Complete the remaining reliability acceptance in `WORK_ORDER.md` before usability expansion. Then take endpoint configuration and strict CLI input from `IMPROVEMENTS_WORK_ORDER.md` in focused tickets, so isolated tests cannot contact public defaults accidentally.
+- [ ] Verify that an agent-authored post/reply is readable by the actual Wiredove embed and website through configured local services. Preserve author identity, exact signed content, previous/reply links, and media hashes. Agent attribution must remain visible and truthful.
+
+**Acceptance:** offline preview makes zero network calls and leaves identity/history/pending state unchanged; interrupted publication resumes the original signed message; concurrent publishers preserve the documented chain; media authorization verifies independently; notification failure cannot undo confirmed publication. Run real local integration in addition to mocks, using disposable keys and no public notifications.
+
+**Deliver:** focused fixes, regression evidence, accurate outcome/recovery documentation, and one local post/reply interoperability record. Record human review, publication, maintenance, and follow-up effort in the Fame experiment; automation alone does not establish sustainability.
+
+**Stop point:** close one review finding with its acceptance evidence before starting the next. No scheduling service, autonomous posting campaign, feed reader, or new framework in this work order. Existing detailed findings below remain authoritative for defects and acceptance.
+
+Coordination: `../wiredove/SHARED_UI_WORK_ORDER.md`, `../anproto-fame/WORK_ORDER.md` (local workspace references).
+
+---
+
 Status: ready for Muse; not complete.
 
 Review baseline: `56ea566` (2026-10-27). All 52 existing tests passed on Node 25.9.0, but targeted offline checks reproduced the five failures below. No live posts or uploads were used for the review. Passing the existing suite does not close this work order.
